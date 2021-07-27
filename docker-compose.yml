@@ -1,0 +1,92 @@
+version: '3.3'
+services:
+  idp.zengo.saml:
+    build: build
+    volumes:
+      - ./simplesamlphp:/code
+      - ./idp:/conf
+    working_dir: /code
+    environment:
+      - SIMPLESAMLPHP_CONFIG_DIR=/conf/
+    links:
+      - mysql
+      - client.signer
+
+  sp.zengo.saml:
+    build: build
+    hostname: sp
+    volumes:
+      - ./simplesamlphp:/code
+      - ./sp1:/conf
+    working_dir: /code
+    environment:
+      - SIMPLESAMLPHP_CONFIG_DIR=/conf/
+    command: apache2 -D FOREGROUND
+    links:
+      - redis
+
+
+  # memcached:
+    # image: memcached
+
+  mysql:
+    image: mysql
+    command: --default-authentication-plugin=mysql_native_password
+    restart: always
+    environment:
+      MYSQL_DATABASE: sessions
+      MYSQL_USER: dbuser
+      MYSQL_PASSWORD: dbpassword
+      MYSQL_ROOT_PASSWORD: rootpassword
+
+  redis:
+    image: redis
+
+  gencert:
+    image: cfssl/cfssl
+    volumes:
+      - .:/work
+    working_dir: /work
+    entrypoint: /bin/bash
+    command:
+      - ./ca/generate.sh
+
+  nginx:
+    image: nginx:stable
+    links:
+      - idp.zengo.saml
+      - sp.zengo.saml
+    volumes:
+      - ./nginx:/etc/nginx:ro
+    ports:
+      - '80:80'
+      - '443:443'
+
+  server.signer:
+    build: signers
+    volumes:
+      - ./signers/script:/script
+      - ./signer.server/gencert.py:/gencert.py
+      - ./simplesamlphp/cert:/cert
+    environment:
+      - IS_SERVER=1
+      - PARTIES
+
+  1_client.signer:
+    build: signers
+    volumes:
+      - ./signers/script:/script
+    links:
+      - server.signer
+    environment: 
+      - PARTIES
+
+  2_client.signer:
+    build: signers
+    volumes:
+      - ./signers/script:/script
+    links:
+      - server.signer
+    environment: 
+      - PARTIES
+    

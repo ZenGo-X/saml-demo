@@ -1,0 +1,64 @@
+#!/bin/bash
+set -x
+KEYS_FILE=/keys.store
+SERVER_ADDR="server.signer"
+CLIENT_ADDR="samlphp_client.signer"
+CLIENT_ADDR="_client.signer"
+MESSAGE_PORT=9000
+RESPONSE_PORT=10000
+ROCKET_URL=http://$SERVER_ADDR:8000
+
+echo '{"parties":"'$PARTIES'", "threshold":"'$(($PARTIES - 1))'"}' > /params.json
+if [ -n "$IS_SERVER" ]; then
+    /mpe/target/release/examples/sm_manager &
+fi
+# Let's keygen first...
+/mpe/target/release/examples/gg18_keygen_client "$ROCKET_URL" "$KEYS_FILE"
+
+ if [ -n "$IS_SERVER" ]; then
+    # On the server, let's generate the appropriate certificate
+    python3 /gencert.py  --keystore-file "${KEYS_FILE}" --ca-name "ZenGo CA" --subject-name "idp.zengo.saml" --days-of-validity 90 --ca-private-key-scalar 12345 --out-file "/cert/idp.zengo.saml.crt"
+fi
+sleep 2
+
+while [ 1 ]; do
+    MESSAGE=$(nc -l 9000)
+    sleep 1
+    if [ -n "$IS_SERVER" ]; then
+        for i in $(seq $(($PARTIES -1))); do
+            echo $MESSAGE | nc -q 0 $i"$CLIENT_ADDR" "$MESSAGE_PORT"
+        done
+        echo "MESSAGE:" $MESSAGE
+    fi
+    MESSAGE=$(echo -n "$MESSAGE" | xxd -r -p | sha256sum | cut -f 1 -d ' ' | tr -d '\n')
+    OUTPUT=$(/mpe/target/release/examples/gg18_sign_client "$ROCKET_URL" "$KEYS_FILE" "$MESSAGE" | sed -r -n  's/^.*SecretKey\((.*)\).*$/\1/p' | xargs)
+    if [ -n "$IS_SERVER" ]; then
+        # Converting the output the ASN.1 DER Signature format...
+        # See: https://superuser.com/questions/1023167/can-i-extract-r-and-s-from-an-ecdsa-signature-in-bit-form-and-vica-versa
+        r=$(echo $OUTPUT | cut -f 1 -d ' ')
+        s=$(echo $OUTPUT | cut -f 2 -d ' ')
+
+        # Devide by 2 because hex representation
+        r_len=$((${#r} / 2))
+        s_len=$((${#s} / 2))
+
+        # Ensure first bit is zero.
+        if [ "$((0x$(echo $r | cut -c -2)))" -ge 128 ]; then
+            r=00$r
+            r_len=$(($r_len + 1))
+        fi
+        
+        if [ "$((0x$(echo $s | cut -c -2)))" -ge 128 ]; then
+            s=00$s
+            s_len=$(($s_len + 1))
+        fi
+
+        r_encoded=02$(printf "%02x" $r_len)$r
+        s_encoded=02$(printf "%02x" $s_len)$s
+        elements_encoded=$r_encoded$s_encoded
+        elements_encoded_len=$((${#elements_encoded} / 2))
+        total_encoding=30$(printf "%02x" $elements_encoded_len)$elements_encoded
+
+        echo -n "$total_encoding" | nc  -w 5 -q 0 -l "$RESPONSE_PORT"
+    fi
+done
